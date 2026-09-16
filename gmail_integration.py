@@ -245,7 +245,7 @@ class GmailSpamFilter:
         
         for email in emails:
             email_text = EmailProcessor.combine_email_text(email)
-            classification = classifier.classify_email(email_text)
+            classification = self.classifier.classify_email(email_text)  # FIXED: Added self.
             
             email['classification'] = classification
             
