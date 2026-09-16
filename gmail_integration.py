@@ -1,5 +1,6 @@
 """
 Gmail Integration Module - Connect to Gmail API and classify emails
+Enhanced version with automatic spam movement
 """
 
 from google.auth.transport.requests import Request
@@ -16,7 +17,7 @@ from spam_classifier import SpamClassifier, EmailProcessor
 class GmailConnector:
     """Connect to Gmail API and fetch emails"""
     
-    SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+    SCOPES = ['https://www.googleapis.com/auth/gmail.modify']  # Modified for write access
     
     def __init__(self, credentials_file='credentials.json'):
         """
@@ -140,23 +141,94 @@ class GmailConnector:
         except Exception as e:
             print(f"Error extracting body: {e}")
             return ''
+    
+    def move_email_to_spam(self, message_id):
+        """
+        Move email to spam folder
+        
+        Args:
+            message_id: Gmail message ID
+            
+        Returns:
+            Boolean - True if successful
+        """
+        try:
+            # Add SPAM label and remove INBOX label
+            self.service.users().messages().modify(
+                userId='me',
+                id=message_id,
+                body={
+                    'addLabelIds': ['SPAM'],
+                    'removeLabelIds': ['INBOX']
+                }
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"Error moving email to spam: {e}")
+            return False
+    
+    def move_email_to_inbox(self, message_id):
+        """
+        Move email back to inbox from spam
+        
+        Args:
+            message_id: Gmail message ID
+            
+        Returns:
+            Boolean - True if successful
+        """
+        try:
+            self.service.users().messages().modify(
+                userId='me',
+                id=message_id,
+                body={
+                    'addLabelIds': ['INBOX'],
+                    'removeLabelIds': ['SPAM']
+                }
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"Error moving email to inbox: {e}")
+            return False
+    
+    def delete_email(self, message_id):
+        """
+        Permanently delete email
+        
+        Args:
+            message_id: Gmail message ID
+            
+        Returns:
+            Boolean - True if successful
+        """
+        try:
+            self.service.users().messages().delete(
+                userId='me',
+                id=message_id
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"Error deleting email: {e}")
+            return False
 
 
 class GmailSpamFilter:
-    """Main class to filter Gmail emails for spam"""
+    """Main class to filter Gmail emails for spam and move them"""
     
     def __init__(self, credentials_file='credentials.json'):
         """Initialize spam filter with Gmail connector"""
         self.gmail = GmailConnector(credentials_file)
         self.classifier = SpamClassifier()
     
-    def check_inbox_for_spam(self, query='is:unread', max_results=10):
+    def check_inbox_for_spam(self, query='is:unread', max_results=10, auto_move=False, confidence_threshold=0.7):
         """
         Check inbox emails and classify them
         
         Args:
             query: Gmail search query
             max_results: Maximum emails to check
+            auto_move: Automatically move spam to spam folder
+            confidence_threshold: Confidence level to mark as spam (0-1)
             
         Returns:
             Dictionary with spam and legitimate emails
@@ -166,12 +238,14 @@ class GmailSpamFilter:
         results = {
             'spam': [],
             'legitimate': [],
-            'suspicious': []
+            'suspicious': [],
+            'moved_to_spam': 0,
+            'errors': 0
         }
         
         for email in emails:
             email_text = EmailProcessor.combine_email_text(email)
-            classification = self.classifier.classify_email(email_text)
+            classification = classifier.classify_email(email_text)
             
             email['classification'] = classification
             
@@ -179,8 +253,18 @@ class GmailSpamFilter:
             confidence = final_pred.get('confidence', 0)
             
             if final_pred.get('is_spam'):
-                if confidence > 0.7:
+                if confidence > confidence_threshold:
                     results['spam'].append(email)
+                    
+                    # Auto-move to spam if enabled
+                    if auto_move:
+                        success = self.gmail.move_email_to_spam(email['message_id'])
+                        if success:
+                            results['moved_to_spam'] += 1
+                            print(f"✅ Moved to spam: {email['subject'][:50]}")
+                        else:
+                            results['errors'] += 1
+                            print(f"❌ Failed to move: {email['subject'][:50]}")
                 else:
                     results['suspicious'].append(email)
             else:
@@ -194,7 +278,7 @@ class GmailSpamFilter:
         print("GMAIL SPAM FILTER RESULTS")
         print("="*70)
         
-        print(f"\n📧 LEGITIMATE EMAILS ({len(results['legitimate'])})")
+        print(f"\n✅ LEGITIMATE EMAILS ({len(results['legitimate'])})")
         print("-"*70)
         for email in results['legitimate']:
             self._print_email(email, 'LEGITIMATE')
@@ -208,6 +292,14 @@ class GmailSpamFilter:
         print("-"*70)
         for email in results['spam']:
             self._print_email(email, 'SPAM')
+        
+        # Show movement stats
+        if 'moved_to_spam' in results and results['moved_to_spam'] > 0:
+            print(f"\n📊 AUTO-MOVE STATS")
+            print("-"*70)
+            print(f"  ✅ Moved to spam: {results['moved_to_spam']}")
+            if results.get('errors', 0) > 0:
+                print(f"  ❌ Errors: {results['errors']}")
     
     def _print_email(self, email, category):
         """Print individual email info"""
@@ -218,3 +310,24 @@ class GmailSpamFilter:
         if 'classification' in email:
             final = email['classification'].get('final_prediction', {})
             print(f"  Confidence: {final.get('confidence', 0):.2%}")
+    
+    def batch_check_and_move(self, max_results=10, auto_move=True, confidence_threshold=0.7):
+        """
+        Convenience method to check inbox and automatically move spam
+        
+        Args:
+            max_results: Maximum emails to process
+            auto_move: Whether to move spam automatically
+            confidence_threshold: Confidence threshold for spam classification
+        """
+        print(f"🔍 Checking top {max_results} emails...")
+        results = self.check_inbox_for_spam(
+            query='is:unread',
+            max_results=max_results,
+            auto_move=auto_move,
+            confidence_threshold=confidence_threshold
+        )
+        
+        self.print_results(results)
+        
+        return results
